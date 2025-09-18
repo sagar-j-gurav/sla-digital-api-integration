@@ -26,8 +26,12 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
-// Initialize SLA Integration
-const slaIntegration = new SLADigitalIntegration(NODE_ENV);
+// Map NODE_ENV to SLA environment
+// development -> sandbox, staging -> sandbox, production -> production
+const SLA_ENV = NODE_ENV === 'production' ? 'production' : 'sandbox';
+
+// Initialize SLA Integration with correct environment
+const slaIntegration = new SLADigitalIntegration(SLA_ENV);
 
 // ============================================
 // MIDDLEWARE STACK
@@ -71,7 +75,7 @@ app.use('/hooks/', limiter);
 // ============================================
 
 const ipWhitelistMiddleware = (req, res, next) => {
-  // Skip in test mode
+  // Skip in test mode or development
   if (process.env.SKIP_IP_WHITELIST === 'true' || NODE_ENV === 'development') {
     return next();
   }
@@ -143,6 +147,7 @@ app.get('/health', async (req, res) => {
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       environment: NODE_ENV,
+      sla_environment: SLA_ENV,
       database: dbHealthy ? 'connected' : 'disconnected',
       sla: slaHealth,
       memory: process.memoryUsage(),
@@ -186,7 +191,7 @@ app.post('/api/zain-bh/pin',
       });
 
       // In sandbox, PIN is always 000000
-      if (NODE_ENV === 'sandbox') {
+      if (SLA_ENV === 'sandbox') {
         result.testPin = process.env.SANDBOX_TEST_PIN || '000000';
       }
 
@@ -377,7 +382,7 @@ app.get('/api/zain-bh/checkout-url',
         success: true,
         checkoutUrl: checkoutUrl,
         operator: 'zain-bh',
-        environment: NODE_ENV
+        environment: SLA_ENV
       });
     } catch (error) {
       res.status(500).json({
@@ -490,13 +495,14 @@ app.post('/internal/test-credentials/zain-bh',
   ipWhitelistMiddleware,
   async (req, res) => {
     try {
-      const testClient = new SLADigitalIntegration(NODE_ENV);
+      const testClient = new SLADigitalIntegration(SLA_ENV);
       const config = testClient.getOperatorConfig('zain-bh');
 
       res.json({
         success: true,
         operator: 'zain-bh',
-        environment: NODE_ENV,
+        node_environment: NODE_ENV,
+        sla_environment: SLA_ENV,
         configured: !!config,
         features: config ? {
           supportsPIN: testClient.supportsPINAPI('zain-bh'),
@@ -591,7 +597,8 @@ async function startServer() {
         ========================================
         SLA Digital API Integration Server
         ========================================
-        Environment: ${NODE_ENV}
+        Node Environment: ${NODE_ENV}
+        SLA Environment: ${SLA_ENV}
         Port: ${PORT}
         Database: PostgreSQL
         
