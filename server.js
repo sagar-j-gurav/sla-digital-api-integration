@@ -1,0 +1,648 @@
+/**
+ * SLA Digital API Integration - Express Server
+ * Main server implementation with webhook endpoints and internal APIs
+ * Focus: Zain Bahrain operator integration
+ */
+
+require('dotenv').config();
+
+const express = require('express');
+const helmet = require('helmet');
+const cors = require('cors');
+const compression = require('compression');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+const { body, validationResult } = require('express-validator');
+const crypto = require('crypto');
+
+// Import the existing SLA integration library
+const { SLADigitalIntegration } = require('./src/index');
+
+// Database connection (to be implemented)
+const { connectDB, getDB } = require('./src/database/connection');
+
+// Initialize Express app
+const app = express();
+const PORT = process.env.PORT || 3000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+
+// Initialize SLA Integration
+const slaIntegration = new SLADigitalIntegration(NODE_ENV);
+
+// ============================================
+// MIDDLEWARE STACK
+// ============================================
+
+// Security headers
+app.use(helmet());
+
+// CORS configuration
+app.use(cors({
+  origin: process.env.CORS_ORIGINS?.split(',') || '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true
+}));
+
+// Compression
+app.use(compression());
+
+// Body parsing
+app.use(express.json({ limit: process.env.MAX_JSON_SIZE || '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: process.env.MAX_REQUEST_SIZE || '10mb' }));
+
+// Request logging
+if (process.env.ENABLE_REQUEST_LOGGING !== 'false') {
+  app.use(morgan('combined'));
+}
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || 60000),
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || 100),
+  message: 'Too many requests from this IP, please try again later.'
+});
+
+// Apply rate limiting to all routes
+app.use('/api/', limiter);
+app.use('/hooks/', limiter);
+
+// ============================================
+// IP WHITELIST MIDDLEWARE
+// ============================================
+
+const ipWhitelistMiddleware = (req, res, next) => {
+  // Skip in test mode
+  if (process.env.SKIP_IP_WHITELIST === 'true' || NODE_ENV === 'development') {
+    return next();
+  }
+
+  const clientIP = req.ip || req.connection.remoteAddress;
+  const whitelistedIPs = process.env.WHITELISTED_IPS?.split(',') || [];
+
+  // Check if IP is whitelisted
+  const isWhitelisted = whitelistedIPs.some(allowedIP => {
+    return allowedIP.trim() === clientIP || 
+           allowedIP.includes('/') && clientIP.startsWith(allowedIP.split('/')[0]);
+  });
+
+  if (!isWhitelisted) {
+    console.error(`Unauthorized IP attempt: ${clientIP}`);
+    return res.status(403).json({ error: 'Forbidden: IP not whitelisted' });
+  }
+
+  next();
+};
+
+// ============================================
+// WEBHOOK SIGNATURE VALIDATION
+// ============================================
+
+const validateWebhookSignature = (req, res, next) => {
+  const signature = req.headers['x-webhook-signature'];
+  const webhookSecret = process.env.WEBHOOK_SECRET;
+
+  if (!webhookSecret) {
+    console.error('WEBHOOK_SECRET not configured');
+    return res.status(500).json({ error: 'Server configuration error' });
+  }
+
+  if (!signature) {
+    return res.status(401).json({ error: 'Missing webhook signature' });
+  }
+
+  // Calculate expected signature
+  const payload = JSON.stringify(req.body);
+  const expectedSignature = crypto
+    .createHmac('sha256', webhookSecret)
+    .update(payload)
+    .digest('hex');
+
+  if (signature !== expectedSignature) {
+    console.error('Invalid webhook signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  next();
+};
+
+// ============================================
+// HEALTH CHECK ENDPOINT
+// ============================================
+
+app.get('/health', async (req, res) => {
+  try {
+    // Check database connection
+    const db = await getDB();
+    const dbHealthy = db ? true : false;
+
+    // Get SLA integration health
+    const slaHealth = await slaIntegration.healthCheck();
+
+    const health = {
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      environment: NODE_ENV,
+      database: dbHealthy ? 'connected' : 'disconnected',
+      sla: slaHealth,
+      memory: process.memoryUsage(),
+      version: require('./package.json').version
+    };
+
+    res.status(200).json(health);
+  } catch (error) {
+    console.error('Health check failed:', error);
+    res.status(503).json({
+      status: 'unhealthy',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// ============================================
+// ZAIN BAHRAIN API ENDPOINTS
+// ============================================
+
+// Generate PIN for Zain Bahrain
+app.post('/api/zain-bh/pin', 
+  ipWhitelistMiddleware,
+  async (req, res) => {
+    try {
+      const { msisdn, campaign, merchant } = req.body;
+      
+      if (!msisdn || !campaign) {
+        return res.status(400).json({ 
+          error: 'Missing required parameters: msisdn, campaign' 
+        });
+      }
+
+      const result = await slaIntegration.generatePIN('zain-bh', {
+        msisdn,
+        campaign: campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
+        merchant: merchant || process.env.MERCHANT_ID,
+        template: 'subscription',
+        language: 'en'
+      });
+
+      // In sandbox, PIN is always 000000
+      if (NODE_ENV === 'sandbox') {
+        result.testPin = process.env.SANDBOX_TEST_PIN || '000000';
+      }
+
+      res.json({
+        success: true,
+        message: 'PIN sent successfully',
+        data: result
+      });
+    } catch (error) {
+      console.error('PIN generation error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// Create subscription for Zain Bahrain
+app.post('/api/zain-bh/subscription',
+  ipWhitelistMiddleware,
+  async (req, res) => {
+    try {
+      const { msisdn, pin, campaign, merchant } = req.body;
+      
+      if (!msisdn || !pin) {
+        return res.status(400).json({ 
+          error: 'Missing required parameters: msisdn, pin' 
+        });
+      }
+
+      const result = await slaIntegration.createSubscription('zain-bh', {
+        msisdn,
+        pin,
+        campaign: campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
+        merchant: merchant || process.env.MERCHANT_ID
+      });
+
+      // Store subscription in database
+      const db = await getDB();
+      if (db && result.success) {
+        await db.query(
+          `INSERT INTO subscriptions (
+            subscription_id, operator_code, msisdn, campaign_id,
+            merchant_id, status, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            result.subscriptionId || crypto.randomUUID(),
+            'zain-bh',
+            msisdn,
+            campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
+            merchant || process.env.MERCHANT_ID,
+            result.status,
+            new Date()
+          ]
+        );
+      }
+
+      res.json({
+        success: true,
+        message: 'Subscription created successfully',
+        data: result
+      });
+    } catch (error) {
+      console.error('Subscription creation error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// One-off charge for Zain Bahrain
+app.post('/api/zain-bh/charge',
+  ipWhitelistMiddleware,
+  async (req, res) => {
+    try {
+      const { msisdn, amount, campaign, merchant } = req.body;
+      
+      if (!msisdn || !amount) {
+        return res.status(400).json({ 
+          error: 'Missing required parameters: msisdn, amount' 
+        });
+      }
+
+      const result = await slaIntegration.charge('zain-bh', {
+        msisdn,
+        amount,
+        campaign: campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
+        merchant: merchant || process.env.MERCHANT_ID
+      });
+
+      // Store transaction in database
+      const db = await getDB();
+      if (db) {
+        await db.query(
+          `INSERT INTO transactions (
+            transaction_id, operator_code, msisdn, amount,
+            status, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            result.transactionId || crypto.randomUUID(),
+            'zain-bh',
+            msisdn,
+            amount,
+            result.status,
+            new Date()
+          ]
+        );
+      }
+
+      res.json({
+        success: true,
+        message: 'Charge completed successfully',
+        data: result
+      });
+    } catch (error) {
+      console.error('Charge error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// Delete subscription for Zain Bahrain
+app.delete('/api/zain-bh/subscription',
+  ipWhitelistMiddleware,
+  async (req, res) => {
+    try {
+      const { msisdn, service, merchant } = req.body;
+      
+      if (!msisdn) {
+        return res.status(400).json({ 
+          error: 'Missing required parameter: msisdn' 
+        });
+      }
+
+      const result = await slaIntegration.deleteSubscription('zain-bh', {
+        msisdn,
+        service: service || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
+        merchant: merchant || process.env.MERCHANT_ID
+      });
+
+      // Update subscription status in database
+      const db = await getDB();
+      if (db && result.success) {
+        await db.query(
+          `UPDATE subscriptions 
+           SET status = 'cancelled', cancelled_at = $1
+           WHERE msisdn = $2 AND operator_code = 'zain-bh'`,
+          [new Date(), msisdn]
+        );
+      }
+
+      res.json({
+        success: true,
+        message: 'Subscription deleted successfully',
+        data: result
+      });
+    } catch (error) {
+      console.error('Subscription deletion error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// Get checkout URL for Zain Bahrain
+app.get('/api/zain-bh/checkout-url',
+  (req, res) => {
+    try {
+      const { msisdn, campaign, merchant, price, language } = req.query;
+      
+      const checkoutUrl = slaIntegration.getCheckoutUrl('zain-bh', {
+        msisdn,
+        campaign: campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
+        merchant: merchant || process.env.MERCHANT_ID,
+        price,
+        language: language || 'en'
+      });
+
+      res.json({
+        success: true,
+        checkoutUrl: checkoutUrl,
+        operator: 'zain-bh',
+        environment: NODE_ENV
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// ============================================
+// WEBHOOK ENDPOINTS
+// ============================================
+
+// Main Alacrity webhook endpoint
+app.post('/hooks/alacrity', 
+  validateWebhookSignature,
+  async (req, res) => {
+    try {
+      const webhookData = req.body;
+      console.log('Received Alacrity webhook:', webhookData);
+
+      // Store webhook event in database
+      const db = await getDB();
+      if (db) {
+        await db.query(
+          `INSERT INTO webhook_events (
+            event_id, operator, event_type, payload, received_at
+          ) VALUES ($1, $2, $3, $4, $5)`,
+          [
+            webhookData.eventId || crypto.randomUUID(),
+            webhookData.operator || 'alacrity',
+            webhookData.eventType || 'unknown',
+            JSON.stringify(webhookData),
+            new Date()
+          ]
+        );
+      }
+
+      // Process webhook through the integration library
+      const result = await slaIntegration.processWebhook(webhookData);
+
+      res.status(200).json({
+        success: true,
+        message: 'Webhook processed successfully',
+        result: result
+      });
+    } catch (error) {
+      console.error('Webhook processing error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// Zain Bahrain specific webhook endpoint
+app.post('/hooks/zain-bh',
+  ipWhitelistMiddleware,
+  async (req, res) => {
+    try {
+      const webhookData = req.body;
+      console.log('Received Zain Bahrain webhook:', webhookData);
+
+      // Store webhook event
+      const db = await getDB();
+      if (db) {
+        await db.query(
+          `INSERT INTO webhook_events (
+            event_id, operator, event_type, payload, received_at
+          ) VALUES ($1, $2, $3, $4, $5)`,
+          [
+            webhookData.eventId || crypto.randomUUID(),
+            'zain-bh',
+            webhookData.eventType || 'notification',
+            JSON.stringify(webhookData),
+            new Date()
+          ]
+        );
+      }
+
+      // Process Zain-specific webhook data
+      const result = await slaIntegration.processWebhook({
+        ...webhookData,
+        operator: 'zain-bh'
+      });
+
+      res.status(200).json({
+        success: true,
+        operator: 'zain-bh',
+        result: result
+      });
+    } catch (error) {
+      console.error('Zain Bahrain webhook error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// ============================================
+// INTERNAL API ENDPOINTS
+// ============================================
+
+// Test Zain Bahrain credentials
+app.post('/internal/test-credentials/zain-bh',
+  ipWhitelistMiddleware,
+  async (req, res) => {
+    try {
+      const testClient = new SLADigitalIntegration(NODE_ENV);
+      const config = testClient.getOperatorConfig('zain-bh');
+
+      res.json({
+        success: true,
+        operator: 'zain-bh',
+        environment: NODE_ENV,
+        configured: !!config,
+        features: config ? {
+          supportsPIN: testClient.supportsPINAPI('zain-bh'),
+          flowType: config.flowType,
+          country: config.country,
+          pinLength: process.env.ZAIN_BH_PIN_LENGTH || 6,
+          serviceId: process.env.OPERATOR_ZAIN_BH_SERVICE_ID ? 'configured' : 'missing'
+        } : null
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// Get Zain Bahrain transactions
+app.get('/internal/zain-bh/transactions',
+  ipWhitelistMiddleware,
+  async (req, res) => {
+    try {
+      const { limit = 10 } = req.query;
+      
+      const db = await getDB();
+      if (!db) {
+        return res.status(503).json({ error: 'Database unavailable' });
+      }
+
+      const result = await db.query(
+        `SELECT * FROM transactions 
+         WHERE operator_code = 'zain-bh'
+         ORDER BY created_at DESC
+         LIMIT $1`,
+        [limit]
+      );
+
+      res.json({
+        success: true,
+        operator: 'zain-bh',
+        count: result.rows.length,
+        transactions: result.rows
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// ============================================
+// ERROR HANDLING
+// ============================================
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `Cannot ${req.method} ${req.path}`,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  
+  res.status(err.status || 500).json({
+    error: 'Internal Server Error',
+    message: NODE_ENV === 'production' ? 'An error occurred' : err.message,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ============================================
+// SERVER STARTUP & SHUTDOWN
+// ============================================
+
+async function startServer() {
+  try {
+    // Connect to database
+    console.log('Connecting to PostgreSQL...');
+    await connectDB();
+    console.log('Database connected successfully');
+
+    // Start Express server
+    const server = app.listen(PORT, () => {
+      console.log(`
+        ========================================
+        SLA Digital API Integration Server
+        ========================================
+        Environment: ${NODE_ENV}
+        Port: ${PORT}
+        Database: PostgreSQL
+        
+        Zain Bahrain Endpoints:
+        - POST   /api/zain-bh/pin           - Generate OTP PIN
+        - POST   /api/zain-bh/subscription  - Create subscription
+        - POST   /api/zain-bh/charge        - One-off charge
+        - DELETE /api/zain-bh/subscription  - Cancel subscription
+        - GET    /api/zain-bh/checkout-url  - Get checkout URL
+        
+        Webhook URLs:
+        - POST   /hooks/alacrity            - Main webhook
+        - POST   /hooks/zain-bh             - Zain Bahrain webhook
+        
+        Health Check:
+        - GET    /health                    - Server health status
+        ========================================
+      `);
+    });
+
+    // Graceful shutdown handling
+    const gracefulShutdown = async (signal) => {
+      console.log(`\nReceived ${signal}, starting graceful shutdown...`);
+      
+      server.close(() => {
+        console.log('HTTP server closed');
+      });
+
+      // Close database connections
+      const db = await getDB();
+      if (db) {
+        await db.end();
+        console.log('Database connections closed');
+      }
+
+      process.exit(0);
+    };
+
+    // Handle shutdown signals
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Start the server
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = app;
