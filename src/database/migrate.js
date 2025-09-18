@@ -72,25 +72,31 @@ async function runMigrations() {
       
       console.log(`Executing ${file}...`);
       
-      // Read and execute migration
+      // Read migration file
       const filePath = path.join(migrationsDir, file);
       const sql = await fs.readFile(filePath, 'utf8');
       
-      // Split by semicolons and execute each statement
-      const statements = sql
-        .split(';')
-        .map(s => s.trim())
-        .filter(s => s.length > 0 && !s.startsWith('--'));
-      
-      for (const statement of statements) {
-        if (statement.length > 0) {
-          await db.query(statement);
-        }
+      // Execute the entire migration as a single transaction
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        
+        // Execute the entire SQL file at once
+        // This preserves the order and context of statements
+        await client.query(sql);
+        
+        await client.query('COMMIT');
+        console.log(`Migration ${file} completed successfully`);
+        
+        // Mark as executed
+        await markMigrationExecuted(file);
+      } catch (error) {
+        await client.query('ROLLBACK');
+        console.error(`Migration ${file} failed:`, error.message);
+        throw error;
+      } finally {
+        client.release();
       }
-      
-      // Mark as executed
-      await markMigrationExecuted(file);
-      console.log(`Completed ${file}`);
     }
     
     console.log('All migrations completed successfully');
@@ -128,18 +134,70 @@ async function rollbackLastMigration() {
     
     try {
       const sql = await fs.readFile(rollbackPath, 'utf8');
-      await db.query(sql);
       
-      // Remove from migrations table
-      await db.query('DELETE FROM migrations WHERE id = $1', [migration.id]);
-      
-      console.log(`Rollback completed for ${migration.filename}`);
+      // Execute rollback in a transaction
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(sql);
+        
+        // Remove from migrations table
+        await client.query('DELETE FROM migrations WHERE id = $1', [migration.id]);
+        
+        await client.query('COMMIT');
+        console.log(`Rollback completed for ${migration.filename}`);
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
     } catch (error) {
-      console.error(`No rollback file found: ${rollbackFile}`);
-      console.error('Manual rollback may be required');
+      if (error.code === 'ENOENT') {
+        console.error(`No rollback file found: ${rollbackFile}`);
+        console.error('Manual rollback may be required');
+      } else {
+        throw error;
+      }
     }
   } catch (error) {
     console.error('Rollback error:', error);
+    throw error;
+  }
+}
+
+/**
+ * Reset database (dangerous - drops all tables)
+ */
+async function resetDatabase() {
+  console.log('WARNING: Resetting database - this will drop all tables!');
+  console.log('Waiting 3 seconds... Press Ctrl+C to cancel');
+  
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  
+  try {
+    const db = await getDB();
+    
+    // Drop all tables
+    await db.query(`
+      DROP TABLE IF EXISTS migrations CASCADE;
+      DROP TABLE IF EXISTS operators CASCADE;
+      DROP TABLE IF EXISTS transactions CASCADE;
+      DROP TABLE IF EXISTS subscriptions CASCADE;
+      DROP TABLE IF EXISTS webhook_events CASCADE;
+      DROP TABLE IF EXISTS operation_audit CASCADE;
+      DROP TABLE IF EXISTS operator_envs CASCADE;
+      DROP TABLE IF EXISTS merchant_profiles CASCADE;
+      DROP TABLE IF EXISTS ip_whitelists CASCADE;
+      DROP TABLE IF EXISTS acr_mappings CASCADE;
+    `);
+    
+    console.log('Database reset complete');
+    
+    // Now run migrations
+    await runMigrations();
+  } catch (error) {
+    console.error('Reset error:', error);
     throw error;
   }
 }
@@ -152,6 +210,10 @@ if (require.main === module) {
     rollbackLastMigration()
       .then(() => process.exit(0))
       .catch(() => process.exit(1));
+  } else if (command === 'reset') {
+    resetDatabase()
+      .then(() => process.exit(0))
+      .catch(() => process.exit(1));
   } else {
     runMigrations()
       .then(() => process.exit(0))
@@ -159,4 +221,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { runMigrations, rollbackLastMigration };
+module.exports = { runMigrations, rollbackLastMigration, resetDatabase };
