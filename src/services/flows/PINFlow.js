@@ -33,7 +33,8 @@ class PINFlow {
         merchant: params.merchant,
         template: params.template || 'subscription',
         language: params.language || 'en',
-        ...(config.requiresAmount ? { amount: params.amount } : {})
+        ...(config.requiresAmount ? { amount: params.amount } : {}),
+        ...(params.fraud_token ? { fraud_token: params.fraud_token } : {})
       });
 
       if (!pinResponse.success) {
@@ -78,15 +79,18 @@ class PINFlow {
 
     // Add operator-specific requirements
     
-    // Ooredoo Kuwait requires amount
-    if (operator === 'ooredoo-kw' && params.amount) {
+    // Ooredoo Kuwait requires amount - FIXED: Check operator specifically
+    if (operator === 'ooredoo-kw') {
+      if (!params.amount) {
+        throw new Error('Amount is required for Ooredoo Kuwait PIN generation');
+      }
       pinParams.amount = params.amount;
     }
 
     // Mobily KSA requires fraud token
     if (operator === 'mobily-sa') {
       if (!params.fraud_token) {
-        throw new Error('Fraud token required for Mobily KSA');
+        throw new Error('Fraud token is required for Mobily KSA');
       }
       pinParams.fraud_token = params.fraud_token;
     }
@@ -201,6 +205,11 @@ class PINFlow {
       throw new Error(`PIN flow not supported for ${operator}`);
     }
 
+    // Validate amount for operators that require it
+    if (operator === 'ooredoo-kw' && !params.amount) {
+      throw new Error('Amount is required for Ooredoo Kuwait charge');
+    }
+
     // Step 1: Generate PIN for charge
     const pinResponse = await this.generateAndSendPIN(operator, {
       msisdn: params.msisdn,
@@ -208,7 +217,8 @@ class PINFlow {
       merchant: params.merchant,
       template: 'charge',
       language: params.language || 'en',
-      amount: params.amount // Amount is required for charge
+      amount: params.amount, // Amount is required for charge
+      ...(params.fraud_token ? { fraud_token: params.fraud_token } : {})
     });
 
     if (!pinResponse.success) {
