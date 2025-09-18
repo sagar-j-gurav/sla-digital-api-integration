@@ -87,15 +87,19 @@ class ZainBahrainWrapper {
 
   /**
    * Get base URL for Zain Bahrain
-   * Zain uses special msisdn.sla-alacrity.com domain
+   * CORRECTED: Using proper SLA API URLs
    */
   getBaseURL() {
+    // FIXED: Correct URLs for SLA Digital API
     const envUrls = {
-      sandbox: 'https://msisdn.sla-alacrity.com/api/alacrity/v2.2',
-      production: 'https://msisdn.sla-alacrity.com/api/alacrity/v2.2',
-      preproduction: 'https://msisdn-pp.sla-alacrity.com/api/alacrity/v2.2'
+      sandbox: 'https://api.sla-alacrity.com/api/alacrity/v2.2',      // Correct sandbox URL
+      production: 'https://api.sla-alacrity.com/api/alacrity/v2.2',   // Production URL
+      preproduction: 'https://api-pp.sla-alacrity.com/api/alacrity/v2.2'  // Pre-prod URL
     };
 
+    // Note: For Zain operators, they sometimes use a special msisdn domain for checkout
+    // But for API calls, use the standard API domain
+    
     return envUrls[this.environment] || envUrls.sandbox;
   }
 
@@ -326,6 +330,7 @@ class ZainBahrainWrapper {
 
   /**
    * Build checkout URL for Zain Bahrain
+   * Note: Checkout might use a different domain
    */
   buildCheckoutUrl(params) {
     const baseUrl = this.getCheckoutBaseUrl();
@@ -344,14 +349,18 @@ class ZainBahrainWrapper {
 
   /**
    * Get checkout base URL
+   * Some operators use special checkout domains
    */
   getCheckoutBaseUrl() {
     const envUrls = {
-      sandbox: 'https://msisdn.sla-alacrity.com/checkout',
-      production: 'https://msisdn.sla-alacrity.com/checkout',
-      preproduction: 'https://msisdn-pp.sla-alacrity.com/checkout'
+      sandbox: 'https://checkout.sla-alacrity.com',     // Standard checkout URL
+      production: 'https://checkout.sla-alacrity.com',  // Standard checkout URL
+      preproduction: 'https://checkout-pp.sla-alacrity.com'
     };
 
+    // Note: Some Zain operators might use msisdn.sla-alacrity.com for checkout
+    // but this varies by configuration
+    
     return envUrls[this.environment] || envUrls.sandbox;
   }
 
@@ -409,7 +418,7 @@ class ZainBahrainWrapper {
     if (!msisdn) return '';
     
     // Remove any non-digits
-    let cleaned = msisdn.replace(/\\D/g, '');
+    let cleaned = msisdn.replace(/\D/g, '');
     
     // Add 973 country code if not present
     if (!cleaned.startsWith('973')) {
@@ -443,12 +452,15 @@ class ZainBahrainWrapper {
     };
 
     // Add suggested action based on error
-    if (error.response?.status === 401) {
+    if (error.code === 'ENOTFOUND') {
+      errorResponse.error.suggestedAction = 'Check your internet connection and API URL configuration';
+      errorResponse.error.message = `Cannot connect to API host: ${error.hostname}`;
+    } else if (error.response?.status === 401) {
       errorResponse.error.suggestedAction = 'Check API credentials in .env file';
     } else if (error.response?.status === 403) {
       errorResponse.error.suggestedAction = 'Check IP whitelist configuration';
     } else if (error.response?.status === 400) {
-      errorResponse.error.suggestedAction = 'Verify request parameters';
+      errorResponse.error.suggestedAction = 'Verify request parameters and merchant ID';
     } else if (error.response?.data?.error_code === 'INVALID_PIN') {
       errorResponse.error.suggestedAction = 'PIN is invalid or expired. Generate a new PIN';
     } else if (error.response?.data?.error_code === 'INSUFFICIENT_BALANCE') {
