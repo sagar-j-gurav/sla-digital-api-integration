@@ -10,6 +10,7 @@
     "test:watch": "jest --watch",
     "migrate": "node src/database/migrate.js",
     "migrate:rollback": "node src/database/migrate.js rollback",
+    "migrate:reset": "node src/database/migrate.js reset",
     "test:zain": "node tests/test-zain-bahrain.js",
     "lint": "eslint src/",
     "format": "prettier --write 'src/**/*.js'"
