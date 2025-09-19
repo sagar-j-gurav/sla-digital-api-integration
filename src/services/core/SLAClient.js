@@ -288,6 +288,13 @@ class SLAClient {
       }
     }
 
+    // Note: SLA documentation states to use 'campaign' not 'service' for delete
+    // Ensure the parameter name is correct
+    if (params.service && !params.campaign) {
+      params.campaign = params.service;
+      delete params.service;
+    }
+
     const endpoint = apiConfig.endpoints.subscription.delete;
     return this.makeRequest(endpoint, params, operator);
   }
@@ -394,6 +401,7 @@ class SLAClient {
 
   /**
    * Build checkout URL
+   * Updated to correctly use 'locale' parameter and ensure redirect_url is included
    */
   buildCheckoutUrl(operator, params) {
     const config = operatorConfigs[operator];
@@ -401,9 +409,10 @@ class SLAClient {
     // Get base checkout URL
     let checkoutUrl = config.checkoutUrl || `${this.config.checkoutUrl}/purchase`;
     
-    // Handle environment-specific URLs
+    // Handle environment-specific URLs for sandbox
     if (this.environment === 'sandbox') {
       checkoutUrl = checkoutUrl.replace('checkout.sla-alacrity.com', 'checkout-sandbox.sla-alacrity.com');
+      checkoutUrl = checkoutUrl.replace('msisdn.sla-alacrity.com', 'msisdn-sandbox.sla-alacrity.com');
     }
 
     // Handle Axiata special URL
@@ -411,11 +420,11 @@ class SLAClient {
       checkoutUrl = checkoutUrl.replace('/purchase', '/purchase/axiata');
     }
 
-    // Build query parameters
+    // Build query parameters - IMPORTANT: use 'service' not 'campaign' for checkout
     const queryParams = {
       merchant: params.merchant,
-      service: params.campaign,
-      redirect_url: params.redirect_url
+      service: params.campaign,  // Note: checkout uses 'service' parameter
+      redirect_url: params.redirect_url  // REQUIRED parameter
     };
 
     // Add optional parameters
@@ -431,8 +440,14 @@ class SLAClient {
       queryParams.transaction_id = params.transaction_id || this.generateTransactionId();
     }
 
-    if (params.language) {
-      queryParams.language = params.language;
+    // Use 'locale' parameter for language (ISO639-1)
+    if (params.locale) {
+      queryParams.locale = params.locale;
+    }
+    
+    // Add msisdn if provided (optional for some operators like Movitel)
+    if (params.msisdn) {
+      queryParams.msisdn = params.msisdn;
     }
 
     const queryString = this.buildQueryString(queryParams);
