@@ -155,6 +155,7 @@ const operatorConfigs = {
     currency: 'KWD',
     flow: 'checkout_only',
     checkoutUrl: 'http://msisdn.sla-alacrity.com/purchase',
+    checkoutRequiresRedirect: true,
     pinLength: 4,
     statusResponse: 'SUCCESS',
     statusNotifications: true,
@@ -171,6 +172,7 @@ const operatorConfigs = {
     currency: 'SAR',
     flow: 'checkout_only',
     checkoutUrl: 'http://msisdn.sla-alacrity.com/purchase',
+    checkoutRequiresRedirect: true,
     pinLength: 6,
     statusResponse: 'SUCCESS',
     recurringNotifications: false,
@@ -183,6 +185,8 @@ const operatorConfigs = {
     country: 'Bahrain',
     currency: 'BHD',
     flow: 'pin_api_allowed',
+    checkoutUrl: 'http://msisdn.sla-alacrity.com/purchase',  // Added missing checkout URL
+    checkoutRequiresRedirect: true,  // Added redirect requirement
     pinLength: 5,
     supportedLanguages: ['en', 'ar'],
     maxCharge: 30,
@@ -195,6 +199,8 @@ const operatorConfigs = {
     country: 'Jordan',
     currency: 'JOD',
     flow: 'pin_api_allowed',
+    checkoutUrl: 'http://msisdn.sla-alacrity.com/purchase',  // Added for consistency
+    checkoutRequiresRedirect: true,
     pinLength: 5,
     supportedLanguages: ['en', 'ar'],
     moSMS: true,
@@ -378,10 +384,17 @@ function getCheckoutUrl(operatorCode) {
   return config?.checkoutUrl || 'http://checkout.sla-alacrity.com/purchase';
 }
 
+// Helper function to check if operator requires redirect for checkout
+function requiresCheckoutRedirect(operatorCode) {
+  const config = operatorConfigs[operatorCode];
+  return config?.checkoutRequiresRedirect || false;
+}
+
 module.exports = {
   operatorConfigs,
   getOperatorsByCountry,
   getOperatorsByFlow,
   supportsPINAPI,
-  getCheckoutUrl
+  getCheckoutUrl,
+  requiresCheckoutRedirect
 };
