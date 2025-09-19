@@ -18,6 +18,9 @@ const crypto = require('crypto');
 // Import the existing SLA integration library
 const { SLADigitalIntegration } = require('./src/index');
 
+// Import SMS service
+const SMSService = require('./src/services/sms.service');
+
 // Database connection (to be implemented)
 const { connectDB, getDB } = require('./src/database/connection');
 
@@ -32,6 +35,9 @@ const SLA_ENV = NODE_ENV === 'production' ? 'production' : 'sandbox';
 
 // Initialize SLA Integration with correct environment
 const slaIntegration = new SLADigitalIntegration(SLA_ENV);
+
+// Initialize SMS Service
+const smsService = new SMSService(slaIntegration);
 
 // ============================================
 // MIDDLEWARE STACK
@@ -394,6 +400,224 @@ app.get('/api/zain-bh/checkout-url',
 );
 
 // ============================================
+// SMS ENDPOINTS
+// ============================================
+
+// Send generic SMS for Zain Bahrain
+app.post('/api/zain-bh/sms',
+  ipWhitelistMiddleware,
+  [
+    body('msisdn').notEmpty().withMessage('MSISDN is required'),
+    body('message').notEmpty().withMessage('Message is required')
+  ],
+  async (req, res) => {
+    // Validate request
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    try {
+      const { msisdn, message, campaign, merchant } = req.body;
+
+      // Validate MSISDN format
+      if (!smsService.validateMSISDN(msisdn, 'zain-bh')) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid MSISDN format for Zain Bahrain. Expected format: 973XXXXXXXX'
+        });
+      }
+
+      const result = await smsService.sendSMS('zain-bh', {
+        msisdn,
+        message,
+        campaign,
+        merchant
+      });
+
+      // Store SMS record in database
+      const db = await getDB();
+      if (db && result.success) {
+        await db.query(
+          `INSERT INTO sms_logs (
+            correlator, operator_code, msisdn, message, 
+            status, sent_at
+          ) VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            result.correlator,
+            'zain-bh',
+            msisdn,
+            message.substring(0, 160), // Store first 160 chars
+            result.success ? 'sent' : 'failed',
+            new Date()
+          ]
+        );
+      }
+
+      res.json(result);
+    } catch (error) {
+      console.error('SMS error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// Send Welcome SMS for Zain Bahrain
+app.post('/api/zain-bh/welcome-sms',
+  ipWhitelistMiddleware,
+  [
+    body('msisdn').notEmpty().withMessage('MSISDN is required'),
+    body('serviceName').notEmpty().withMessage('Service name is required'),
+    body('accessUrl').isURL().withMessage('Valid access URL is required')
+  ],
+  async (req, res) => {
+    // Validate request
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    try {
+      const { 
+        msisdn, 
+        serviceName, 
+        accessUrl, 
+        subscriptionId,
+        language,
+        campaign,
+        merchant 
+      } = req.body;
+
+      // Validate MSISDN format
+      if (!smsService.validateMSISDN(msisdn, 'zain-bh')) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid MSISDN format for Zain Bahrain. Expected format: 973XXXXXXXX'
+        });
+      }
+
+      // Format access URL with tracking parameters
+      const formattedUrl = smsService.formatAccessUrl(accessUrl, {
+        operator: 'zain-bh',
+        sub_id: subscriptionId,
+        source: 'welcome_sms',
+        timestamp: Date.now()
+      });
+
+      const result = await smsService.sendWelcomeSMS('zain-bh', {
+        msisdn,
+        serviceName,
+        accessUrl: formattedUrl,
+        subscriptionId,
+        language: language || 'en',
+        campaign,
+        merchant
+      });
+
+      // Store welcome SMS record in database
+      const db = await getDB();
+      if (db && result.success) {
+        await db.query(
+          `INSERT INTO sms_logs (
+            correlator, operator_code, msisdn, message, 
+            message_type, subscription_id, status, sent_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [
+            result.correlator,
+            'zain-bh',
+            msisdn,
+            result.messageContent,
+            'welcome',
+            subscriptionId,
+            result.success ? 'sent' : 'failed',
+            new Date()
+          ]
+        );
+      }
+
+      res.json(result);
+    } catch (error) {
+      console.error('Welcome SMS error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// Send batch SMS for Zain Bahrain
+app.post('/api/zain-bh/batch-sms',
+  ipWhitelistMiddleware,
+  [
+    body('recipients').isArray({ min: 1 }).withMessage('Recipients array is required'),
+    body('message').notEmpty().withMessage('Message is required')
+  ],
+  async (req, res) => {
+    // Validate request
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    try {
+      const { recipients, message, campaign, merchant } = req.body;
+
+      // Validate all MSISDNs
+      const invalidNumbers = recipients.filter(msisdn => 
+        !smsService.validateMSISDN(msisdn, 'zain-bh')
+      );
+
+      if (invalidNumbers.length > 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid MSISDN format detected',
+          invalidNumbers
+        });
+      }
+
+      const result = await smsService.sendBatchSMS('zain-bh', {
+        recipients,
+        message,
+        campaign,
+        merchant
+      });
+
+      // Store batch record in database
+      const db = await getDB();
+      if (db) {
+        await db.query(
+          `INSERT INTO batch_sms_logs (
+            batch_id, operator_code, total_recipients, successful, 
+            failed, message, created_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            result.batchId,
+            'zain-bh',
+            result.total,
+            result.successful,
+            result.failed,
+            message.substring(0, 160),
+            new Date()
+          ]
+        );
+      }
+
+      res.json(result);
+    } catch (error) {
+      console.error('Batch SMS error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+);
+
+// ============================================
 // WEBHOOK ENDPOINTS
 // ============================================
 
@@ -608,6 +832,11 @@ async function startServer() {
         - POST   /api/zain-bh/charge        - One-off charge
         - DELETE /api/zain-bh/subscription  - Cancel subscription
         - GET    /api/zain-bh/checkout-url  - Get checkout URL
+        
+        SMS Endpoints:
+        - POST   /api/zain-bh/sms           - Send generic SMS
+        - POST   /api/zain-bh/welcome-sms   - Send welcome SMS
+        - POST   /api/zain-bh/batch-sms     - Send batch SMS
         
         Webhook URLs:
         - POST   /hooks/alacrity            - Main webhook
