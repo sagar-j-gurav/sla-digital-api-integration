@@ -49,7 +49,8 @@ class ZainBahrainWrapper {
       timeout: 30000,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'SLA-Digital-ZainBH/1.0'
+        'User-Agent': 'SLA-Digital-ZainBH/1.0',
+        'Accept': 'application/json'
       }
     });
 
@@ -91,17 +92,22 @@ class ZainBahrainWrapper {
   }
 
   /**
-   * Get base URL for Zain Bahrain API calls
+   * Get base URL for Zain Bahrain API calls from operator config
    */
   getBaseURL() {
-    // API URLs for regular API calls (not checkout)
-    const envUrls = {
+    // Get base URLs from operator config
+    const envConfig = this.operatorConfig?.environments || {};
+    
+    // Default URLs if not in config
+    const defaultUrls = {
       sandbox: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
       production: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
       preproduction: 'https://api-pp.sla-alacrity.com/api/alacrity/v2.2'
     };
 
-    return envUrls[this.environment] || envUrls.sandbox;
+    // Use config URL if available, otherwise use default
+    const configUrl = envConfig[this.environment]?.baseUrl;
+    return configUrl || defaultUrls[this.environment] || defaultUrls.sandbox;
   }
 
   /**
@@ -121,7 +127,7 @@ class ZainBahrainWrapper {
 
   /**
    * Generate PIN for Zain Bahrain
-   * Zain BH supports PIN API with 5-digit PINs
+   * Zain BH supports PIN API with 5-digit PINs (000000 in sandbox)
    */
   async generatePIN(params) {
     const requiredParams = {
@@ -137,15 +143,20 @@ class ZainBahrainWrapper {
         params: requiredParams
       });
 
+      // Handle response according to documentation
+      const isSuccess = response.data.success === true || 
+                       response.data.status === 'OK' || 
+                       response.data.status === 'PIN_SENT';
+
       return {
-        success: response.data.status === 'OK' || response.data.status === 'PIN_SENT',
-        status: response.data.status,
-        pinSent: true,
+        success: isSuccess,
+        status: response.data.status || (response.data.success ? 'PIN_SENT' : 'FAILED'),
+        pinSent: isSuccess,
         pinLength: this.config.pinLength,
         validitySeconds: this.config.pinValiditySeconds,
-        message: `PIN sent to ${requiredParams.msisdn}`,
+        message: isSuccess ? `PIN sent to ${requiredParams.msisdn}` : 'PIN sending failed',
         testMode: this.environment === 'sandbox',
-        testPin: this.environment === 'sandbox' ? process.env.SANDBOX_TEST_PIN : undefined,
+        testPin: this.environment === 'sandbox' ? process.env.SANDBOX_TEST_PIN || '000000' : undefined,
         raw: response.data
       };
     } catch (error) {
@@ -159,35 +170,61 @@ class ZainBahrainWrapper {
 
   /**
    * Create subscription with PIN verification
+   * Updated to use correct /subscription/create endpoint
    */
   async createSubscription(params) {
     const requiredParams = {
       msisdn: this.formatMSISDN(params.msisdn),
-      pin: params.pin,
       campaign: params.campaign || this.config.serviceId,
       merchant: params.merchant || this.config.merchantId
     };
 
-    // Validate PIN format
-    if (requiredParams.pin && requiredParams.pin.length !== this.config.pinLength) {
-      throw new Error(`Invalid PIN length. Expected ${this.config.pinLength} digits`);
+    // Add PIN only if not using token
+    if (!params.msisdn?.startsWith('TOKEN:')) {
+      requiredParams.pin = params.pin;
+      
+      // Validate PIN format
+      if (requiredParams.pin && requiredParams.pin.length !== this.config.pinLength) {
+        throw new Error(`Invalid PIN length. Expected ${this.config.pinLength} digits`);
+      }
+    }
+
+    // Add optional parameters
+    if (params.language) {
+      requiredParams.language = params.language;
+    }
+    
+    if (params.trial) {
+      requiredParams.trial = params.trial;
+    }
+    
+    if (params.trial_once !== undefined) {
+      requiredParams.trial_once = params.trial_once;
     }
 
     try {
-      const response = await this.apiClient.post('/subscription', null, {
+      // Use correct endpoint: /subscription/create
+      const response = await this.apiClient.post('/subscription/create', null, {
         params: requiredParams
       });
 
-      // Zain returns SUCCESS instead of CHARGED
-      const isSuccess = response.data.status === 'SUCCESS' || response.data.status === 'CHARGED';
+      // Handle response according to documentation
+      const isSuccess = response.data.success === true || 
+                       response.data.success?.type === 'subscription';
+      
+      // Extract transaction info if available
+      const transactionInfo = response.data.success?.transaction || {};
 
       return {
         success: isSuccess,
-        status: response.data.status === 'SUCCESS' ? 'CHARGED' : response.data.status,
-        subscriptionId: response.data.subscription_id,
-        transactionId: response.data.transaction_id,
-        msisdn: requiredParams.msisdn,
-        message: isSuccess ? 'Subscription created successfully' : response.data.message,
+        status: transactionInfo.status || (isSuccess ? 'CHARGED' : 'FAILED'),
+        subscriptionId: response.data.success?.uuid || response.data.uuid,
+        billId: response.data.success?.bill_id,
+        transactionId: transactionInfo.transaction_id,
+        msisdn: response.data.success?.msisdn || requiredParams.msisdn,
+        nextPaymentTimestamp: response.data.success?.next_payment_timestamp,
+        message: isSuccess ? 'Subscription created successfully' : 
+                (response.data.error?.message || 'Subscription creation failed'),
         raw: response.data
       };
     } catch (error) {
@@ -197,23 +234,28 @@ class ZainBahrainWrapper {
 
   /**
    * Delete subscription
+   * Updated to use correct /subscription/delete endpoint
    */
   async deleteSubscription(params) {
     const requiredParams = {
       msisdn: this.formatMSISDN(params.msisdn),
-      service: params.service || params.campaign || this.config.serviceId,
+      campaign: params.campaign || params.service || this.config.serviceId,
       merchant: params.merchant || this.config.merchantId
     };
 
     try {
-      const response = await this.apiClient.post('/unsubscribe', null, {
+      // Use correct endpoint: /subscription/delete
+      const response = await this.apiClient.post('/subscription/delete', null, {
         params: requiredParams
       });
 
+      // According to docs, delete is async and returns {success: true}
       return {
-        success: response.data.status === 'OK' || response.data.status === 'SUCCESS',
-        status: response.data.status,
-        message: 'Subscription cancelled successfully',
+        success: response.data.success === true,
+        status: response.data.success ? 'DELETED' : 'FAILED',
+        message: response.data.success ? 
+                'Subscription deletion initiated. You will receive a webhook notification.' : 
+                'Subscription deletion failed',
         raw: response.data
       };
     } catch (error) {
@@ -223,24 +265,42 @@ class ZainBahrainWrapper {
 
   /**
    * Get subscription status
+   * Updated to use correct /subscription/status endpoint
    */
   async getSubscriptionStatus(params) {
-    const requiredParams = {
-      msisdn: this.formatMSISDN(params.msisdn),
-      service: params.service || params.campaign || this.config.serviceId,
-      merchant: params.merchant || this.config.merchantId
-    };
+    const requiredParams = {};
+    
+    // Support both uuid and msisdn+campaign lookup
+    if (params.uuid) {
+      requiredParams.uuid = params.uuid;
+    } else {
+      requiredParams.msisdn = this.formatMSISDN(params.msisdn);
+      requiredParams.campaign = params.campaign || params.service || this.config.serviceId;
+      requiredParams.merchant = params.merchant || this.config.merchantId;
+    }
 
     try {
-      const response = await this.apiClient.post('/status', null, {
+      // Use correct endpoint based on parameters
+      const endpoint = params.uuid ? '/subscription/status' : '/subscription/latest';
+      const response = await this.apiClient.post(endpoint, null, {
         params: requiredParams
       });
 
+      // Handle successful response
+      const subscriptionData = response.data;
+      
       return {
         success: true,
-        status: response.data.status,
-        subscribed: response.data.status === 'ACTIVE',
-        details: response.data,
+        status: subscriptionData.status,
+        subscribed: subscriptionData.status === 'ACTIVE',
+        uuid: subscriptionData.uuid,
+        service: subscriptionData.service,
+        msisdn: subscriptionData.msisdn,
+        frequency: subscriptionData.frequency,
+        amount: subscriptionData.amount,
+        currency: subscriptionData.currency,
+        nextPaymentTimestamp: subscriptionData.next_payment_timestamp,
+        transactions: subscriptionData.transactions,
         raw: response.data
       };
     } catch (error) {
@@ -254,6 +314,7 @@ class ZainBahrainWrapper {
 
   /**
    * One-off charge
+   * Note: According to docs, one-off charge requires subscription first
    */
   async charge(params) {
     const requiredParams = {
@@ -263,6 +324,11 @@ class ZainBahrainWrapper {
       merchant: params.merchant || this.config.merchantId,
       currency: params.currency || 'BHD'
     };
+
+    // Add PIN if provided (for non-token charges)
+    if (!params.msisdn?.startsWith('TOKEN:') && params.pin) {
+      requiredParams.pin = params.pin;
+    }
 
     // Add correlator for tracking
     if (params.correlator) {
@@ -276,7 +342,8 @@ class ZainBahrainWrapper {
         params: requiredParams
       });
 
-      const isSuccess = response.data.status === 'SUCCESS' || response.data.status === 'CHARGED';
+      const isSuccess = response.data.status === 'SUCCESS' || 
+                       response.data.status === 'CHARGED';
 
       return {
         success: isSuccess,
@@ -285,7 +352,8 @@ class ZainBahrainWrapper {
         correlator: requiredParams.correlator,
         amount: requiredParams.amount,
         currency: requiredParams.currency,
-        message: isSuccess ? `Charged ${requiredParams.amount} ${requiredParams.currency}` : response.data.message,
+        message: isSuccess ? `Charged ${requiredParams.amount} ${requiredParams.currency}` : 
+                (response.data.message || 'Charge failed'),
         raw: response.data
       };
     } catch (error) {
@@ -387,6 +455,15 @@ class ZainBahrainWrapper {
     // Use the checkout URL from operator config
     const configUrl = getCheckoutUrl(this.operatorCode);
     
+    // Get environment-specific checkout URL if defined in operator config
+    const envConfig = this.operatorConfig?.environments || {};
+    const envCheckoutUrl = envConfig[this.environment]?.checkoutUrl;
+    
+    // Use environment-specific URL if available, otherwise use default
+    if (envCheckoutUrl) {
+      return envCheckoutUrl;
+    }
+    
     // Handle environment-specific URLs if needed
     if (this.environment === 'sandbox' && configUrl.includes('http://')) {
       // For sandbox, keep http for testing
@@ -415,7 +492,7 @@ class ZainBahrainWrapper {
       eventType: webhookData.eventType || webhookData.event_type,
       status: webhookData.status,
       transactionId: webhookData.transaction_id || webhookData.transactionId,
-      subscriptionId: webhookData.subscription_id || webhookData.subscriptionId,
+      subscriptionId: webhookData.subscription_id || webhookData.subscriptionId || webhookData.uuid,
       msisdn: webhookData.msisdn,
       timestamp: new Date().toISOString()
     };
@@ -426,6 +503,7 @@ class ZainBahrainWrapper {
         result.message = 'Subscription created via webhook';
         break;
       case 'subscription.cancelled':
+      case 'subscription.deleted':
         result.message = 'Subscription cancelled via webhook';
         break;
       case 'charge.success':
@@ -451,6 +529,11 @@ class ZainBahrainWrapper {
    */
   formatMSISDN(msisdn) {
     if (!msisdn) return '';
+    
+    // If it's a token or ACR, return as is
+    if (msisdn.startsWith('TOKEN:') || msisdn.startsWith('ACR:')) {
+      return msisdn;
+    }
     
     // Remove any non-digits
     let cleaned = msisdn.replace(/\D/g, '');
@@ -480,7 +563,8 @@ class ZainBahrainWrapper {
       operator: 'zain-bh',
       error: {
         message: error.message,
-        code: error.response?.data?.error_code,
+        code: error.response?.data?.error?.code || error.response?.data?.error_code,
+        category: error.response?.data?.error?.category,
         status: error.response?.status,
         details: error.response?.data
       }
@@ -496,7 +580,8 @@ class ZainBahrainWrapper {
       errorResponse.error.suggestedAction = 'Check IP whitelist configuration';
     } else if (error.response?.status === 400) {
       errorResponse.error.suggestedAction = 'Verify request parameters and merchant ID';
-    } else if (error.response?.data?.error_code === 'INVALID_PIN') {
+    } else if (error.response?.data?.error?.code === '2010' || 
+               error.response?.data?.error_code === 'INVALID_PIN') {
       errorResponse.error.suggestedAction = 'PIN is invalid or expired. Generate a new PIN';
     } else if (error.response?.data?.error_code === 'INSUFFICIENT_BALANCE') {
       errorResponse.error.suggestedAction = 'Subscriber has insufficient balance';
