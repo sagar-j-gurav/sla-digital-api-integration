@@ -5,11 +5,15 @@
 
 const axios = require('axios');
 const crypto = require('crypto');
+// Import operator configuration
+const { operatorConfigs, getCheckoutUrl, requiresCheckoutRedirect } = require('../../config/operators.config');
 
 class ZainBahrainWrapper {
   constructor(environment = 'sandbox') {
     this.operatorCode = 'zain-bh';
     this.environment = environment;
+    // Load operator config from centralized configuration
+    this.operatorConfig = operatorConfigs[this.operatorCode];
     this.apiClient = this.createApiClient();
     this.config = this.loadConfig();
   }
@@ -21,9 +25,10 @@ class ZainBahrainWrapper {
     return {
       serviceId: process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
       merchantId: process.env.MERCHANT_ID,
-      shortcode: process.env.ZAIN_BH_SHORTCODE || '94005',
+      redirectUrl: process.env.CHECKOUT_REDIRECT_URL || 'https://example.com/success',
+      shortcode: process.env.ZAIN_BH_SHORTCODE || this.operatorConfig?.shortCode || '94005',
       keyword: process.env.ZAIN_BH_KEYWORD || 'SUB',
-      pinLength: parseInt(process.env.ZAIN_BH_PIN_LENGTH || 6),
+      pinLength: parseInt(process.env.ZAIN_BH_PIN_LENGTH || this.operatorConfig?.pinLength || 5),
       pinValiditySeconds: parseInt(process.env.ZAIN_BH_PIN_VALIDITY_SECONDS || 120),
       supportsPIN: true,
       supportsSubscription: true,
@@ -86,20 +91,16 @@ class ZainBahrainWrapper {
   }
 
   /**
-   * Get base URL for Zain Bahrain
-   * CORRECTED: Using proper SLA API URLs
+   * Get base URL for Zain Bahrain API calls
    */
   getBaseURL() {
-    // FIXED: Correct URLs for SLA Digital API
+    // API URLs for regular API calls (not checkout)
     const envUrls = {
-      sandbox: 'https://api.sla-alacrity.com/api/alacrity/v2.2',      // Correct sandbox URL
-      production: 'https://api.sla-alacrity.com/api/alacrity/v2.2',   // Production URL
-      preproduction: 'https://api-pp.sla-alacrity.com/api/alacrity/v2.2'  // Pre-prod URL
+      sandbox: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+      production: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+      preproduction: 'https://api-pp.sla-alacrity.com/api/alacrity/v2.2'
     };
 
-    // Note: For Zain operators, they sometimes use a special msisdn domain for checkout
-    // But for API calls, use the standard API domain
-    
     return envUrls[this.environment] || envUrls.sandbox;
   }
 
@@ -120,7 +121,7 @@ class ZainBahrainWrapper {
 
   /**
    * Generate PIN for Zain Bahrain
-   * Zain BH supports PIN API with 6-digit PINs
+   * Zain BH supports PIN API with 5-digit PINs
    */
   async generatePIN(params) {
     const requiredParams = {
@@ -324,19 +325,46 @@ class ZainBahrainWrapper {
     }
   }
 
+  /**
+   * Send Welcome SMS with tokenized URL
+   * Follows Zain BH format requirements
+   */
+  async sendWelcomeSMS(params) {
+    const serviceName = params.service_name || 'Your Service';
+    const accessUrl = params.access_url || params.url;
+    
+    if (!accessUrl) {
+      throw new Error('Access URL is required for welcome SMS');
+    }
+
+    // Format message according to Zain BH requirements
+    const message = `To access your subscription to ${serviceName}, click ${accessUrl}`;
+
+    return this.sendSMS({
+      msisdn: params.msisdn,
+      message: message,
+      merchant: params.merchant || this.config.merchantId,
+      shortcode: params.shortcode || this.config.shortcode
+    });
+  }
+
   // ============================================
   // CHECKOUT
   // ============================================
 
   /**
    * Build checkout URL for Zain Bahrain
-   * Note: Checkout might use a different domain
+   * Uses configuration from operators.config.js
    */
   buildCheckoutUrl(params) {
+    // Get checkout URL from operator config
     const baseUrl = this.getCheckoutBaseUrl();
+    
+    // Build query parameters
+    // Note: For checkout, use 'service' instead of 'campaign'
     const queryParams = new URLSearchParams({
-      campaign: params.campaign || this.config.serviceId,
       merchant: params.merchant || this.config.merchantId,
+      service: params.campaign || params.service || this.config.serviceId,  // Support both parameter names
       operator: 'zain-bh',
       ...(params.msisdn && { msisdn: this.formatMSISDN(params.msisdn) }),
       ...(params.price && { price: params.price }),
@@ -344,24 +372,31 @@ class ZainBahrainWrapper {
       ...(params.correlator && { correlator: params.correlator })
     });
 
+    // Add redirect parameter if required (Zain operators need this)
+    if (requiresCheckoutRedirect(this.operatorCode)) {
+      queryParams.append('redirect', params.redirect || this.config.redirectUrl);
+    }
+
     return `${baseUrl}?${queryParams.toString()}`;
   }
 
   /**
-   * Get checkout base URL
-   * Some operators use special checkout domains
+   * Get checkout base URL from configuration
    */
   getCheckoutBaseUrl() {
-    const envUrls = {
-      sandbox: 'https://checkout.sla-alacrity.com',     // Standard checkout URL
-      production: 'https://checkout.sla-alacrity.com',  // Standard checkout URL
-      preproduction: 'https://checkout-pp.sla-alacrity.com'
-    };
-
-    // Note: Some Zain operators might use msisdn.sla-alacrity.com for checkout
-    // but this varies by configuration
+    // Use the checkout URL from operator config
+    const configUrl = getCheckoutUrl(this.operatorCode);
     
-    return envUrls[this.environment] || envUrls.sandbox;
+    // Handle environment-specific URLs if needed
+    if (this.environment === 'sandbox' && configUrl.includes('http://')) {
+      // For sandbox, keep http for testing
+      return configUrl;
+    } else if (this.environment === 'production' && configUrl.includes('http://')) {
+      // For production, upgrade to https
+      return configUrl.replace('http://', 'https://');
+    }
+    
+    return configUrl;
   }
 
   // ============================================
@@ -467,6 +502,8 @@ class ZainBahrainWrapper {
       errorResponse.error.suggestedAction = 'Subscriber has insufficient balance';
     } else if (error.response?.data?.error_code === 'ALREADY_SUBSCRIBED') {
       errorResponse.error.suggestedAction = 'Subscriber is already subscribed to this service';
+    } else if (error.response?.data?.error_code === 'MISSING_REDIRECT') {
+      errorResponse.error.suggestedAction = 'Redirect URL is required for checkout. Add redirect parameter or set CHECKOUT_REDIRECT_URL in .env';
     }
 
     return errorResponse;
