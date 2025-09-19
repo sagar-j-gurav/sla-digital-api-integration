@@ -164,7 +164,18 @@ const operatorConfigs = {
     maxCharge: 30,
     monthlyLimitPostpaid: 90,
     oneSubscriptionPerWeek: true,
-    shortCode: '93052'
+    shortCode: '93052',
+    // Environment-specific configurations
+    environments: {
+      sandbox: {
+        baseUrl: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+        checkoutUrl: 'http://msisdn-sandbox.sla-alacrity.com/purchase'
+      },
+      production: {
+        baseUrl: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+        checkoutUrl: 'https://msisdn.sla-alacrity.com/purchase'
+      }
+    }
   },
   'zain-sa': {
     name: 'Zain KSA',
@@ -178,33 +189,72 @@ const operatorConfigs = {
     recurringNotifications: false,
     supportedLanguages: ['ar'],
     maxCharge: 30,
-    monthlyLimit: 30
+    monthlyLimit: 30,
+    // Environment-specific configurations
+    environments: {
+      sandbox: {
+        baseUrl: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+        checkoutUrl: 'http://msisdn-sandbox.sla-alacrity.com/purchase'
+      },
+      production: {
+        baseUrl: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+        checkoutUrl: 'https://msisdn.sla-alacrity.com/purchase'
+      }
+    }
   },
   'zain-bh': {
     name: 'Zain Bahrain',
     country: 'Bahrain',
     currency: 'BHD',
     flow: 'pin_api_allowed',
-    checkoutUrl: 'http://msisdn.sla-alacrity.com/purchase',  // Added missing checkout URL
-    checkoutRequiresRedirect: true,  // Added redirect requirement
+    checkoutUrl: 'http://msisdn.sla-alacrity.com/purchase',
+    checkoutRequiresRedirect: true,
     pinLength: 5,
     supportedLanguages: ['en', 'ar'],
     maxCharge: 30,
     monthlyLimitPostpaid: 30,
     moSMS: true,
-    shortCode: '94005'
+    shortCode: '94005',
+    // Environment-specific configurations
+    environments: {
+      sandbox: {
+        baseUrl: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+        checkoutUrl: 'http://msisdn-sandbox.sla-alacrity.com/purchase',
+        testPin: '000000',
+        testMsisdn: '97312345678'
+      },
+      production: {
+        baseUrl: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+        checkoutUrl: 'https://msisdn.sla-alacrity.com/purchase'
+      },
+      preproduction: {
+        baseUrl: 'https://api-pp.sla-alacrity.com/api/alacrity/v2.2',
+        checkoutUrl: 'https://msisdn-pp.sla-alacrity.com/purchase'
+      }
+    }
   },
   'zain-jo': {
     name: 'Zain Jordan',
     country: 'Jordan',
     currency: 'JOD',
     flow: 'pin_api_allowed',
-    checkoutUrl: 'http://msisdn.sla-alacrity.com/purchase',  // Added for consistency
+    checkoutUrl: 'http://msisdn.sla-alacrity.com/purchase',
     checkoutRequiresRedirect: true,
     pinLength: 5,
     supportedLanguages: ['en', 'ar'],
     moSMS: true,
-    shortCode: '97970'
+    shortCode: '97970',
+    // Environment-specific configurations
+    environments: {
+      sandbox: {
+        baseUrl: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+        checkoutUrl: 'http://msisdn-sandbox.sla-alacrity.com/purchase'
+      },
+      production: {
+        baseUrl: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+        checkoutUrl: 'https://msisdn.sla-alacrity.com/purchase'
+      }
+    }
   },
   'zain-iq': {
     name: 'Zain Iraq',
@@ -379,9 +429,35 @@ function supportsPINAPI(operatorCode) {
 }
 
 // Helper function to get checkout URL for operator
-function getCheckoutUrl(operatorCode) {
+function getCheckoutUrl(operatorCode, environment = 'production') {
   const config = operatorConfigs[operatorCode];
+  
+  // Check for environment-specific checkout URL
+  if (config?.environments?.[environment]?.checkoutUrl) {
+    return config.environments[environment].checkoutUrl;
+  }
+  
+  // Return default checkout URL
   return config?.checkoutUrl || 'http://checkout.sla-alacrity.com/purchase';
+}
+
+// Helper function to get base API URL for operator
+function getApiBaseUrl(operatorCode, environment = 'production') {
+  const config = operatorConfigs[operatorCode];
+  
+  // Check for environment-specific API base URL
+  if (config?.environments?.[environment]?.baseUrl) {
+    return config.environments[environment].baseUrl;
+  }
+  
+  // Default base URLs
+  const defaultUrls = {
+    sandbox: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+    production: 'https://api.sla-alacrity.com/api/alacrity/v2.2',
+    preproduction: 'https://api-pp.sla-alacrity.com/api/alacrity/v2.2'
+  };
+  
+  return defaultUrls[environment] || defaultUrls.production;
 }
 
 // Helper function to check if operator requires redirect for checkout
@@ -390,11 +466,22 @@ function requiresCheckoutRedirect(operatorCode) {
   return config?.checkoutRequiresRedirect || false;
 }
 
+// Helper function to get test credentials for sandbox
+function getTestCredentials(operatorCode) {
+  const config = operatorConfigs[operatorCode];
+  return config?.environments?.sandbox || {
+    testPin: '000000',
+    testMsisdn: null
+  };
+}
+
 module.exports = {
   operatorConfigs,
   getOperatorsByCountry,
   getOperatorsByFlow,
   supportsPINAPI,
   getCheckoutUrl,
-  requiresCheckoutRedirect
+  getApiBaseUrl,
+  requiresCheckoutRedirect,
+  getTestCredentials
 };
