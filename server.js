@@ -216,25 +216,52 @@ app.post('/api/zain-bh/pin',
   }
 );
 
-// Create subscription for Zain Bahrain
+// Create subscription for Zain Bahrain (UPDATED to handle TOKEN)
 app.post('/api/zain-bh/subscription',
   ipWhitelistMiddleware,
   async (req, res) => {
     try {
-      const { msisdn, pin, campaign, merchant } = req.body;
+      const { msisdn, pin, campaign, merchant, trial, language } = req.body;
       
-      if (!msisdn || !pin) {
+      // Check if using TOKEN-based subscription
+      const isToken = msisdn?.startsWith('TOKEN:');
+      
+      // Validate required parameters based on flow
+      if (!msisdn) {
         return res.status(400).json({ 
-          error: 'Missing required parameters: msisdn, pin' 
+          error: 'Missing required parameter: msisdn (or token)' 
+        });
+      }
+      
+      // PIN is only required for non-token subscriptions
+      if (!isToken && !pin) {
+        return res.status(400).json({ 
+          error: 'Missing required parameter: pin (not needed if using token from checkout)' 
         });
       }
 
-      const result = await slaIntegration.createSubscription('zain-bh', {
+      // Build subscription parameters
+      const subscriptionParams = {
         msisdn,
-        pin,
         campaign: campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
         merchant: merchant || process.env.MERCHANT_ID
-      });
+      };
+      
+      // Only include pin if not using token
+      if (!isToken) {
+        subscriptionParams.pin = pin;
+      }
+      
+      // Add optional parameters
+      if (trial) {
+        subscriptionParams.trial = trial;
+      }
+      
+      if (language) {
+        subscriptionParams.language = language;
+      }
+
+      const result = await slaIntegration.createSubscription('zain-bh', subscriptionParams);
 
       // Store subscription in database
       const db = await getDB();
@@ -242,16 +269,17 @@ app.post('/api/zain-bh/subscription',
         await db.query(
           `INSERT INTO subscriptions (
             subscription_id, operator_code, msisdn, campaign_id,
-            merchant_id, status, created_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            merchant_id, status, created_at, is_token_based
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [
-            result.subscriptionId || crypto.randomUUID(),
+            result.subscriptionId || result.uuid || crypto.randomUUID(),
             'zain-bh',
-            msisdn,
+            isToken ? result.msisdn : msisdn, // Store actual MSISDN from response if token was used
             campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
             merchant || process.env.MERCHANT_ID,
-            result.status,
-            new Date()
+            result.status || 'active',
+            new Date(),
+            isToken
           ]
         );
       }
@@ -259,7 +287,8 @@ app.post('/api/zain-bh/subscription',
       res.json({
         success: true,
         message: 'Subscription created successfully',
-        data: result
+        data: result,
+        flowType: isToken ? 'checkout_token' : 'pin_api'
       });
     } catch (error) {
       console.error('Subscription creation error:', error);
@@ -271,25 +300,43 @@ app.post('/api/zain-bh/subscription',
   }
 );
 
-// One-off charge for Zain Bahrain
+// One-off charge for Zain Bahrain (UPDATED to handle TOKEN)
 app.post('/api/zain-bh/charge',
   ipWhitelistMiddleware,
   async (req, res) => {
     try {
-      const { msisdn, amount, campaign, merchant } = req.body;
+      const { msisdn, pin, amount, campaign, merchant, currency } = req.body;
+      
+      // Check if using TOKEN
+      const isToken = msisdn?.startsWith('TOKEN:');
       
       if (!msisdn || !amount) {
         return res.status(400).json({ 
-          error: 'Missing required parameters: msisdn, amount' 
+          error: 'Missing required parameters: msisdn (or token), amount' 
+        });
+      }
+      
+      // PIN is only required for non-token charges
+      if (!isToken && !pin) {
+        return res.status(400).json({ 
+          error: 'Missing required parameter: pin (not needed if using token)' 
         });
       }
 
-      const result = await slaIntegration.charge('zain-bh', {
+      const chargeParams = {
         msisdn,
         amount,
+        currency: currency || 'BHD',
         campaign: campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
         merchant: merchant || process.env.MERCHANT_ID
-      });
+      };
+      
+      // Only include pin if not using token
+      if (!isToken) {
+        chargeParams.pin = pin;
+      }
+
+      const result = await slaIntegration.charge('zain-bh', chargeParams);
 
       // Store transaction in database
       const db = await getDB();
@@ -325,32 +372,36 @@ app.post('/api/zain-bh/charge',
   }
 );
 
-// Delete subscription for Zain Bahrain
+// Delete subscription for Zain Bahrain (UPDATED to handle TOKEN)
 app.delete('/api/zain-bh/subscription',
   ipWhitelistMiddleware,
   async (req, res) => {
     try {
-      const { msisdn, service, merchant } = req.body;
+      const { msisdn, campaign, merchant } = req.body;
       
       if (!msisdn) {
         return res.status(400).json({ 
-          error: 'Missing required parameter: msisdn' 
+          error: 'Missing required parameter: msisdn (or the same token used for subscription)' 
         });
       }
 
       const result = await slaIntegration.deleteSubscription('zain-bh', {
         msisdn,
-        service: service || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
+        campaign: campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
         merchant: merchant || process.env.MERCHANT_ID
       });
 
       // Update subscription status in database
       const db = await getDB();
       if (db && result.success) {
+        const isToken = msisdn.startsWith('TOKEN:');
         await db.query(
           `UPDATE subscriptions 
            SET status = 'cancelled', cancelled_at = $1
-           WHERE msisdn = $2 AND operator_code = 'zain-bh'`,
+           WHERE operator_code = 'zain-bh' 
+           AND (msisdn = $2 OR (is_token_based = true AND subscription_id IN 
+             (SELECT subscription_id FROM subscriptions WHERE operator_code = 'zain-bh' LIMIT 1)
+           ))`,
           [new Date(), msisdn]
         );
       }
@@ -370,25 +421,70 @@ app.delete('/api/zain-bh/subscription',
   }
 );
 
-// Get checkout URL for Zain Bahrain
+// Get checkout URL for Zain Bahrain (FIXED: Added redirect_url, correlator, locale)
 app.get('/api/zain-bh/checkout-url',
   (req, res) => {
     try {
-      const { msisdn, campaign, merchant, price, language } = req.query;
+      const { 
+        msisdn, 
+        campaign, 
+        merchant, 
+        price, 
+        locale,           // Changed from language to locale
+        redirect_url,     // ADDED: Required parameter
+        correlator        // ADDED: Optional parameter
+      } = req.query;
       
-      const checkoutUrl = slaIntegration.getCheckoutUrl('zain-bh', {
-        msisdn,
+      // Validate required parameter
+      if (!redirect_url) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required parameter: redirect_url'
+        });
+      }
+      
+      // Build checkout parameters
+      const checkoutParams = {
         campaign: campaign || process.env.OPERATOR_ZAIN_BH_SERVICE_ID,
         merchant: merchant || process.env.MERCHANT_ID,
-        price,
-        language: language || 'en'
-      });
+        redirect_url      // REQUIRED for checkout
+      };
+      
+      // Add optional parameters
+      if (msisdn) {
+        checkoutParams.msisdn = msisdn;
+      }
+      
+      if (price) {
+        checkoutParams.price = price;
+      }
+      
+      if (locale) {
+        checkoutParams.locale = locale;  // Using locale instead of language
+      }
+      
+      if (correlator) {
+        checkoutParams.correlator = correlator;
+      }
+      
+      const checkoutUrl = slaIntegration.getCheckoutUrl('zain-bh', checkoutParams);
 
       res.json({
         success: true,
         checkoutUrl: checkoutUrl,
         operator: 'zain-bh',
-        environment: SLA_ENV
+        environment: SLA_ENV,
+        checkoutBase: SLA_ENV === 'sandbox' 
+          ? 'http://msisdn-sandbox.sla-alacrity.com/purchase'
+          : 'http://msisdn.sla-alacrity.com/purchase',
+        parameters: {
+          merchant: checkoutParams.merchant,
+          service: checkoutParams.campaign,
+          redirect_url: checkoutParams.redirect_url,
+          locale: checkoutParams.locale || 'en',
+          correlator: checkoutParams.correlator,
+          price: checkoutParams.price
+        }
       });
     } catch (error) {
       res.status(500).json({
@@ -733,7 +829,8 @@ app.post('/internal/test-credentials/zain-bh',
           flowType: config.flowType,
           country: config.country,
           pinLength: process.env.ZAIN_BH_PIN_LENGTH || 6,
-          serviceId: process.env.OPERATOR_ZAIN_BH_SERVICE_ID ? 'configured' : 'missing'
+          serviceId: process.env.OPERATOR_ZAIN_BH_SERVICE_ID ? 'configured' : 'missing',
+          checkoutUrl: config.checkoutUrl
         } : null
       });
     } catch (error) {
@@ -828,10 +925,10 @@ async function startServer() {
         
         Zain Bahrain Endpoints:
         - POST   /api/zain-bh/pin           - Generate OTP PIN
-        - POST   /api/zain-bh/subscription  - Create subscription
-        - POST   /api/zain-bh/charge        - One-off charge
+        - POST   /api/zain-bh/subscription  - Create subscription (PIN or TOKEN)
+        - POST   /api/zain-bh/charge        - One-off charge (PIN or TOKEN)
         - DELETE /api/zain-bh/subscription  - Cancel subscription
-        - GET    /api/zain-bh/checkout-url  - Get checkout URL
+        - GET    /api/zain-bh/checkout-url  - Get checkout URL (with redirect_url)
         
         SMS Endpoints:
         - POST   /api/zain-bh/sms           - Send generic SMS
